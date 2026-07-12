@@ -3,9 +3,9 @@
 use std::collections::HashMap;
 
 use egui::{
-    Align, Color32, CornerRadius, Frame, Id, LayerId, Layout, Margin, Modifiers, PointerButton,
-    Pos2, Rect, Scene, Sense, Shape, Stroke, StrokeKind, Style, Ui, UiBuilder, UiKind, UiStackInfo,
-    Vec2,
+    Align, Color32, CornerRadius, DragPanButtons, Frame, Id, LayerId, Layout, Margin, Modifiers,
+    PointerButton, Pos2, Rect, Scene, Sense, Shape, Stroke, StrokeKind, Style, Ui, UiBuilder, UiKind,
+    UiStackInfo, Vec2,
     collapsing_header::paint_default_icon,
     emath::{GuiRounding, TSTransform},
     epaint::Shadow,
@@ -506,6 +506,15 @@ pub struct SnarlStyle {
     )]
     pub max_scale: Option<f32>,
 
+    /// Pointer buttons that may pan the graph viewport by dragging.
+    ///
+    /// Defaults to [`DragPanButtons::all`]. Set this to
+    /// [`DragPanButtons::MIDDLE`] to reserve primary-button drags for graph
+    /// interactions such as marquee selection.
+    #[cfg_attr(feature = "serde", serde(skip, default))]
+    #[cfg_attr(feature = "egui-probe", egui_probe(skip))]
+    pub scene_pan_buttons: Option<DragPanButtons>,
+
     /// Enable centering by double click on background
     #[cfg_attr(
         feature = "serde",
@@ -648,6 +657,10 @@ impl SnarlStyle {
         self.max_scale.unwrap_or(2.0)
     }
 
+    fn get_scene_pan_buttons(&self) -> DragPanButtons {
+        self.scene_pan_buttons.unwrap_or(DragPanButtons::all())
+    }
+
     fn get_node_frame(&self, style: &Style) -> Frame {
         self.node_frame.unwrap_or_else(|| Frame::window(style))
     }
@@ -772,6 +785,7 @@ impl SnarlStyle {
 
             min_scale: None,
             max_scale: None,
+            scene_pan_buttons: None,
             node_frame: None,
             header_frame: None,
             centering: None,
@@ -991,6 +1005,7 @@ where
     let mut snarl_resp = ui.response();
     Scene::new()
         .zoom_range(min_scale..=max_scale)
+        .drag_pan_buttons(style.get_scene_pan_buttons())
         .register_pan_and_zoom(&ui, &mut snarl_resp, &mut to_global);
 
     if snarl_resp.changed() {
