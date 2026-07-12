@@ -4,8 +4,8 @@ use std::collections::HashMap;
 
 use egui::{
     Align, Color32, CornerRadius, DragPanButtons, Frame, Id, LayerId, Layout, Margin, Modifiers,
-    PointerButton, Pos2, Rect, Scene, Sense, Shape, Stroke, StrokeKind, Style, Ui, UiBuilder, UiKind,
-    UiStackInfo, Vec2,
+    PointerButton, Pos2, Rect, Scene, Sense, Shape, Stroke, StrokeKind, Style, Ui, UiBuilder,
+    UiKind, UiStackInfo, Vec2,
     collapsing_header::paint_default_icon,
     emath::{GuiRounding, TSTransform},
     epaint::Shadow,
@@ -34,7 +34,10 @@ use self::{
 pub use self::{
     background_pattern::{BackgroundPattern, Grid},
     pin::{AnyPins, PinInfo, PinShape, PinWireInfo, SnarlPin},
-    state::get_selected_nodes,
+    state::{
+        add_selected_nodes, clear_selected_nodes, get_selected_nodes, is_node_selected,
+        remove_selected_nodes, set_selected_nodes,
+    },
     viewer::SnarlViewer,
     wire::{WireLayer, WireStyle},
 };
@@ -307,6 +310,109 @@ pub struct SelectionStyle {
     pub stroke: Stroke,
 }
 
+/// Controls how pointer gestures change node selection.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "egui-probe", derive(egui_probe::EguiProbe))]
+pub enum SelectionInteraction {
+    /// Select and deselect nodes only while modifier keys are held.
+    ///
+    /// This preserves the interaction behavior from egui-snarl 0.11.
+    #[default]
+    ModifierOnly,
+
+    /// Use conventional click and marquee selection gestures.
+    Conventional,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelectionCommand {
+    None,
+    Replace,
+    Add,
+    AddToEnd,
+    Subtract,
+    Clear,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NodeSelectionGesture {
+    Click,
+    Drag,
+}
+
+fn node_selection_command(
+    interaction: SelectionInteraction,
+    modifiers: Modifiers,
+    selected_nodes: &[NodeId],
+    node: NodeId,
+    gesture: NodeSelectionGesture,
+) -> SelectionCommand {
+    match interaction {
+        SelectionInteraction::ModifierOnly => {
+            if modifiers.shift {
+                if modifiers.command {
+                    SelectionCommand::Replace
+                } else {
+                    SelectionCommand::AddToEnd
+                }
+            } else if modifiers.command {
+                SelectionCommand::Subtract
+            } else {
+                SelectionCommand::None
+            }
+        }
+        SelectionInteraction::Conventional => {
+            if modifiers.command {
+                if selected_nodes.len() > 1 && selected_nodes.contains(&node) {
+                    SelectionCommand::Subtract
+                } else {
+                    SelectionCommand::None
+                }
+            } else if modifiers.shift {
+                if selected_nodes.contains(&node) {
+                    SelectionCommand::None
+                } else {
+                    SelectionCommand::Add
+                }
+            } else if gesture == NodeSelectionGesture::Drag && selected_nodes.contains(&node) {
+                SelectionCommand::None
+            } else {
+                SelectionCommand::Replace
+            }
+        }
+    }
+}
+
+fn marquee_selection_command(
+    interaction: SelectionInteraction,
+    modifiers: Modifiers,
+) -> SelectionCommand {
+    if modifiers.command {
+        SelectionCommand::Subtract
+    } else if modifiers.shift {
+        match interaction {
+            SelectionInteraction::ModifierOnly => SelectionCommand::AddToEnd,
+            SelectionInteraction::Conventional => SelectionCommand::Add,
+        }
+    } else {
+        SelectionCommand::Replace
+    }
+}
+
+fn background_click_selection_command(
+    interaction: SelectionInteraction,
+    modifiers: Modifiers,
+) -> SelectionCommand {
+    match interaction {
+        SelectionInteraction::ModifierOnly if modifiers.command => SelectionCommand::Clear,
+        SelectionInteraction::Conventional if !modifiers.shift && !modifiers.command => {
+            SelectionCommand::Clear
+        }
+        _ => SelectionCommand::None,
+    }
+}
+
 /// Controls how pins are placed in the node.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -548,6 +654,14 @@ pub struct SnarlStyle {
     )]
     pub select_style: Option<SelectionStyle>,
 
+    /// Controls how pointer gestures change node selection.
+    /// Defaults to [`SelectionInteraction::ModifierOnly`].
+    #[cfg_attr(
+        feature = "serde",
+        serde(skip_serializing_if = "Option::is_none", default)
+    )]
+    pub selection_interaction: Option<SelectionInteraction>,
+
     /// Controls whether to show magnified text in crisp mode.
     /// This zooms UI style to max scale and scales down the scene.
     #[cfg_attr(
@@ -701,6 +815,10 @@ impl SnarlStyle {
         })
     }
 
+    fn get_selection_interaction(&self) -> SelectionInteraction {
+        self.selection_interaction.unwrap_or_default()
+    }
+
     fn get_crisp_magnified_text(&self) -> bool {
         self.crisp_magnified_text.unwrap_or(false)
     }
@@ -793,6 +911,7 @@ impl SnarlStyle {
             select_fill: None,
             select_rect_contained: None,
             select_style: None,
+            selection_interaction: None,
             crisp_magnified_text: None,
             wire_smoothness: None,
 
@@ -1002,10 +1121,16 @@ where
 
     clamp_scale(&mut to_global, min_scale, max_scale, ui_rect);
 
+    let selection_interaction = style.get_selection_interaction();
+    let mut scene_pan_buttons = style.get_scene_pan_buttons();
+    if selection_interaction == SelectionInteraction::Conventional {
+        scene_pan_buttons.remove(DragPanButtons::PRIMARY);
+    }
+
     let mut snarl_resp = ui.response();
     Scene::new()
         .zoom_range(min_scale..=max_scale)
-        .drag_pan_buttons(style.get_scene_pan_buttons())
+        .drag_pan_buttons(scene_pan_buttons)
         .register_pan_and_zoom(&ui, &mut snarl_resp, &mut to_global);
 
     if snarl_resp.changed() {
@@ -1047,7 +1172,10 @@ where
 
     // Process selection rect.
     let mut rect_selection_ended = None;
-    if modifiers.shift || snarl_state.is_rect_selection() {
+    if selection_interaction == SelectionInteraction::Conventional
+        || modifiers.shift
+        || snarl_state.is_rect_selection()
+    {
         let select_resp = ui.interact(snarl_resp.rect, snarl_id.with("select"), Sense::drag());
 
         if select_resp.dragged_by(PointerButton::Primary)
@@ -1104,6 +1232,7 @@ where
             snarl_id,
             &mut input_info,
             modifiers,
+            selection_interaction,
             &mut output_info,
         );
 
@@ -1218,11 +1347,10 @@ where
             if select { Some(id) } else { None }
         });
 
-        if modifiers.command {
-            snarl_state.deselect_many_nodes(select_nodes);
-        } else {
-            snarl_state.select_many_nodes(!modifiers.shift, select_nodes);
-        }
+        snarl_state.apply_selection(
+            marquee_selection_command(selection_interaction, modifiers),
+            select_nodes,
+        );
     }
 
     if let Some(select_rect) = snarl_state.rect_selection() {
@@ -1253,8 +1381,11 @@ where
         snarl_state.look_at(nodes_bb, ui_rect, min_scale, max_scale);
     }
 
-    if modifiers.command && snarl_resp.clicked_by(PointerButton::Primary) {
-        snarl_state.deselect_all_nodes();
+    if snarl_resp.clicked_by(PointerButton::Primary) {
+        snarl_state.apply_selection(
+            background_click_selection_command(selection_interaction, modifiers),
+            std::iter::empty(),
+        );
     }
 
     // Wire end position will be overridden when link graph menu is opened.
@@ -1787,6 +1918,7 @@ fn draw_node<T, V>(
     snarl_id: Id,
     input_positions: &mut HashMap<InPinId, PinResponse>,
     modifiers: Modifiers,
+    selection_interaction: SelectionInteraction,
     output_positions: &mut HashMap<OutPinId, PinResponse>,
 ) -> Option<DrawNodeResponse>
 where
@@ -1891,12 +2023,23 @@ where
         node_moved = Some((node, r.drag_delta()));
     }
 
-    if r.clicked_by(PointerButton::Primary) || r.dragged_by(PointerButton::Primary) {
-        if modifiers.shift {
-            snarl_state.select_one_node(modifiers.command, node);
-        } else if modifiers.command {
-            snarl_state.deselect_one_node(node);
-        }
+    let node_selection_gesture = if r.dragged_by(PointerButton::Primary) {
+        Some(NodeSelectionGesture::Drag)
+    } else if r.clicked_by(PointerButton::Primary) {
+        Some(NodeSelectionGesture::Click)
+    } else {
+        None
+    };
+
+    if let Some(gesture) = node_selection_gesture {
+        let command = node_selection_command(
+            selection_interaction,
+            modifiers,
+            snarl_state.selected_nodes(),
+            node,
+            gesture,
+        );
+        snarl_state.apply_selection(command, std::iter::once(node));
     }
 
     if r.clicked() || r.dragged() {
@@ -2622,4 +2765,152 @@ fn scale_transform_around(transform: &TSTransform, scaling: f32, point: Pos2) ->
 const fn snarl_style_is_send_sync() {
     const fn is_send_sync<T: Send + Sync>() {}
     is_send_sync::<SnarlStyle>();
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+
+    const NODE: NodeId = NodeId(1);
+    const OTHER: NodeId = NodeId(2);
+
+    fn shift() -> Modifiers {
+        Modifiers {
+            shift: true,
+            ..Modifiers::NONE
+        }
+    }
+
+    fn command() -> Modifiers {
+        Modifiers {
+            command: true,
+            ..Modifiers::NONE
+        }
+    }
+
+    fn conventional_node(
+        modifiers: Modifiers,
+        selected: &[NodeId],
+        gesture: NodeSelectionGesture,
+    ) -> SelectionCommand {
+        node_selection_command(
+            SelectionInteraction::Conventional,
+            modifiers,
+            selected,
+            NODE,
+            gesture,
+        )
+    }
+
+    #[test]
+    fn conventional_plain_click_replaces_selection() {
+        for selected in [&[][..], &[NODE][..], &[NODE, OTHER][..]] {
+            assert_eq!(
+                conventional_node(Modifiers::NONE, selected, NodeSelectionGesture::Click),
+                SelectionCommand::Replace
+            );
+        }
+    }
+
+    #[test]
+    fn conventional_shift_click_only_adds_unselected_node() {
+        assert_eq!(
+            conventional_node(shift(), &[OTHER], NodeSelectionGesture::Click),
+            SelectionCommand::Add
+        );
+        assert_eq!(
+            conventional_node(shift(), &[NODE, OTHER], NodeSelectionGesture::Click),
+            SelectionCommand::None
+        );
+    }
+
+    #[test]
+    fn conventional_command_click_only_removes_from_multi_selection() {
+        assert_eq!(
+            conventional_node(command(), &[NODE, OTHER], NodeSelectionGesture::Click),
+            SelectionCommand::Subtract
+        );
+        assert_eq!(
+            conventional_node(command(), &[NODE], NodeSelectionGesture::Click),
+            SelectionCommand::None
+        );
+        assert_eq!(
+            conventional_node(command(), &[OTHER], NodeSelectionGesture::Click),
+            SelectionCommand::None
+        );
+    }
+
+    #[test]
+    fn conventional_drag_selects_unselected_and_preserves_selected_group() {
+        assert_eq!(
+            conventional_node(Modifiers::NONE, &[OTHER], NodeSelectionGesture::Drag),
+            SelectionCommand::Replace
+        );
+        assert_eq!(
+            conventional_node(Modifiers::NONE, &[NODE, OTHER], NodeSelectionGesture::Drag),
+            SelectionCommand::None
+        );
+    }
+
+    #[test]
+    fn conventional_background_click_and_marquee_commands_match_modifiers() {
+        assert_eq!(
+            background_click_selection_command(SelectionInteraction::Conventional, Modifiers::NONE),
+            SelectionCommand::Clear
+        );
+        assert_eq!(
+            background_click_selection_command(SelectionInteraction::Conventional, shift()),
+            SelectionCommand::None
+        );
+        assert_eq!(
+            marquee_selection_command(SelectionInteraction::Conventional, Modifiers::NONE),
+            SelectionCommand::Replace
+        );
+        assert_eq!(
+            marquee_selection_command(SelectionInteraction::Conventional, shift()),
+            SelectionCommand::Add
+        );
+        assert_eq!(
+            marquee_selection_command(SelectionInteraction::Conventional, command()),
+            SelectionCommand::Subtract
+        );
+    }
+
+    #[test]
+    fn modifier_only_commands_preserve_legacy_bindings() {
+        assert_eq!(
+            node_selection_command(
+                SelectionInteraction::ModifierOnly,
+                Modifiers::NONE,
+                &[],
+                NODE,
+                NodeSelectionGesture::Click
+            ),
+            SelectionCommand::None
+        );
+        assert_eq!(
+            node_selection_command(
+                SelectionInteraction::ModifierOnly,
+                shift(),
+                &[],
+                NODE,
+                NodeSelectionGesture::Click
+            ),
+            SelectionCommand::AddToEnd
+        );
+        assert_eq!(
+            node_selection_command(
+                SelectionInteraction::ModifierOnly,
+                command(),
+                &[NODE],
+                NODE,
+                NodeSelectionGesture::Click
+            ),
+            SelectionCommand::Subtract
+        );
+        assert_eq!(
+            background_click_selection_command(SelectionInteraction::ModifierOnly, command()),
+            SelectionCommand::Clear
+        );
+    }
 }

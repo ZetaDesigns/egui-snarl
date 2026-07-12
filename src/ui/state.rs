@@ -8,7 +8,7 @@ use smallvec::{SmallVec, ToSmallVec, smallvec};
 
 use crate::{InPinId, NodeId, OutPinId, Snarl};
 
-use super::{SnarlWidget, transform_matching_points};
+use super::{SelectionCommand, SnarlWidget, transform_matching_points};
 
 pub type RowHeights = SmallVec<[f32; 8]>;
 
@@ -217,6 +217,34 @@ impl SelectedNodes {
     fn load(cx: &Context, id: Id) -> Self {
         cx.data(|d| d.get_temp::<Self>(id)).unwrap_or_default()
     }
+}
+
+fn collect_unique_nodes(nodes: impl IntoIterator<Item = NodeId>) -> SmallVec<[NodeId; 8]> {
+    let mut unique = SmallVec::new();
+    for node in nodes {
+        if !unique.contains(&node) {
+            unique.push(node);
+        }
+    }
+    unique
+}
+
+fn mutate_selected_nodes(
+    id: Id,
+    cx: &Context,
+    mutation: impl FnOnce(&mut SmallVec<[NodeId; 8]>),
+) -> bool {
+    let mut selected = SelectedNodes::load(cx, id).0;
+    let previous = selected.clone();
+    mutation(&mut selected);
+
+    if selected == previous {
+        return false;
+    }
+
+    SelectedNodes(selected).save(cx, id);
+    cx.request_repaint();
+    true
 }
 
 #[derive(Clone)]
@@ -511,37 +539,47 @@ impl SnarlState {
         &self.selected_nodes
     }
 
-    pub fn select_one_node(&mut self, reset: bool, node: NodeId) {
-        if reset {
-            if self.selected_nodes[..] == [node] {
-                return;
+    pub(crate) fn apply_selection(
+        &mut self,
+        command: SelectionCommand,
+        nodes: impl IntoIterator<Item = NodeId>,
+    ) {
+        match command {
+            SelectionCommand::None => {}
+            SelectionCommand::Replace => {
+                let mut replacement = SmallVec::<[NodeId; 8]>::new();
+                for node in nodes {
+                    if !replacement.contains(&node) {
+                        replacement.push(node);
+                    }
+                }
+                if self.selected_nodes != replacement {
+                    self.selected_nodes = replacement;
+                    self.dirty = true;
+                }
             }
-
-            self.deselect_all_nodes();
-        } else if let Some(pos) = self.selected_nodes.iter().position(|n| *n == node) {
-            if pos == self.selected_nodes.len() - 1 {
-                return;
+            SelectionCommand::Add => {
+                for node in nodes {
+                    if !self.selected_nodes.contains(&node) {
+                        self.selected_nodes.push(node);
+                        self.dirty = true;
+                    }
+                }
             }
-            self.selected_nodes.remove(pos);
-        }
-        self.selected_nodes.push(node);
-        self.dirty = true;
-    }
-
-    pub fn select_many_nodes(&mut self, reset: bool, nodes: impl Iterator<Item = NodeId>) {
-        if reset {
-            self.deselect_all_nodes();
-            self.selected_nodes.extend(nodes);
-            self.dirty = true;
-        } else {
-            nodes.for_each(|node| self.select_one_node(false, node));
-        }
-    }
-
-    pub fn deselect_one_node(&mut self, node: NodeId) {
-        if let Some(pos) = self.selected_nodes.iter().position(|n| *n == node) {
-            self.selected_nodes.remove(pos);
-            self.dirty = true;
+            SelectionCommand::AddToEnd => {
+                for node in nodes {
+                    if let Some(position) = self.selected_nodes.iter().position(|n| *n == node) {
+                        if position == self.selected_nodes.len() - 1 {
+                            continue;
+                        }
+                        self.selected_nodes.remove(position);
+                    }
+                    self.selected_nodes.push(node);
+                    self.dirty = true;
+                }
+            }
+            SelectionCommand::Subtract => self.deselect_many_nodes(nodes.into_iter()),
+            SelectionCommand::Clear => self.deselect_all_nodes(),
         }
     }
 
@@ -610,6 +648,113 @@ impl SnarlWidget {
         ctx.data(|d| d.get_temp::<SelectedNodes>(snarl_id).unwrap_or_default().0)
             .into_vec()
     }
+
+    /// Replaces the selected nodes for the `SnarlWidget` with the same id.
+    ///
+    /// Returns `true` if the selection changed.
+    #[must_use]
+    #[inline]
+    pub fn set_selected_nodes(self, ui: &Ui, nodes: impl IntoIterator<Item = NodeId>) -> bool {
+        self.set_selected_nodes_at(ui.id(), ui.ctx(), nodes)
+    }
+
+    /// Replaces the selected nodes for the `SnarlWidget` with the same id.
+    ///
+    /// `ui_id` must be the Id of the `Ui` instance used in [`SnarlWidget::show`].
+    /// Returns `true` if the selection changed.
+    #[must_use]
+    #[inline]
+    pub fn set_selected_nodes_at(
+        self,
+        ui_id: Id,
+        ctx: &Context,
+        nodes: impl IntoIterator<Item = NodeId>,
+    ) -> bool {
+        set_selected_nodes(self.get_id(ui_id), ctx, nodes)
+    }
+
+    /// Adds nodes to the selection for the `SnarlWidget` with the same id.
+    ///
+    /// Returns `true` if the selection changed.
+    #[must_use]
+    #[inline]
+    pub fn add_selected_nodes(self, ui: &Ui, nodes: impl IntoIterator<Item = NodeId>) -> bool {
+        self.add_selected_nodes_at(ui.id(), ui.ctx(), nodes)
+    }
+
+    /// Adds nodes to the selection for the `SnarlWidget` with the same id.
+    ///
+    /// `ui_id` must be the Id of the `Ui` instance used in [`SnarlWidget::show`].
+    /// Returns `true` if the selection changed.
+    #[must_use]
+    #[inline]
+    pub fn add_selected_nodes_at(
+        self,
+        ui_id: Id,
+        ctx: &Context,
+        nodes: impl IntoIterator<Item = NodeId>,
+    ) -> bool {
+        add_selected_nodes(self.get_id(ui_id), ctx, nodes)
+    }
+
+    /// Removes nodes from the selection for the `SnarlWidget` with the same id.
+    ///
+    /// Returns `true` if the selection changed.
+    #[must_use]
+    #[inline]
+    pub fn remove_selected_nodes(self, ui: &Ui, nodes: impl IntoIterator<Item = NodeId>) -> bool {
+        self.remove_selected_nodes_at(ui.id(), ui.ctx(), nodes)
+    }
+
+    /// Removes nodes from the selection for the `SnarlWidget` with the same id.
+    ///
+    /// `ui_id` must be the Id of the `Ui` instance used in [`SnarlWidget::show`].
+    /// Returns `true` if the selection changed.
+    #[must_use]
+    #[inline]
+    pub fn remove_selected_nodes_at(
+        self,
+        ui_id: Id,
+        ctx: &Context,
+        nodes: impl IntoIterator<Item = NodeId>,
+    ) -> bool {
+        remove_selected_nodes(self.get_id(ui_id), ctx, nodes)
+    }
+
+    /// Clears the selection for the `SnarlWidget` with the same id.
+    ///
+    /// Returns `true` if the selection changed.
+    #[must_use]
+    #[inline]
+    pub fn clear_selected_nodes(self, ui: &Ui) -> bool {
+        self.clear_selected_nodes_at(ui.id(), ui.ctx())
+    }
+
+    /// Clears the selection for the `SnarlWidget` with the same id.
+    ///
+    /// `ui_id` must be the Id of the `Ui` instance used in [`SnarlWidget::show`].
+    /// Returns `true` if the selection changed.
+    #[must_use]
+    #[inline]
+    pub fn clear_selected_nodes_at(self, ui_id: Id, ctx: &Context) -> bool {
+        clear_selected_nodes(self.get_id(ui_id), ctx)
+    }
+
+    /// Returns whether a node is selected in the `SnarlWidget` with the same id.
+    #[must_use]
+    #[inline]
+    pub fn is_node_selected(self, ui: &Ui, node: NodeId) -> bool {
+        self.is_node_selected_at(ui.id(), ui.ctx(), node)
+    }
+
+    /// Returns whether a node is selected in the `SnarlWidget` with the same id.
+    ///
+    /// `ui_id` must be the Id of the `Ui` instance used in [`SnarlWidget::show`].
+    #[must_use]
+    #[inline]
+    pub fn is_node_selected_at(self, ui_id: Id, ctx: &Context, node: NodeId) -> bool {
+        is_node_selected(self.get_id(ui_id), ctx, node)
+    }
 }
 
 /// Returns nodes selected in the UI for the `SnarlWidget` with same ID.
@@ -621,4 +766,135 @@ impl SnarlWidget {
 pub fn get_selected_nodes(id: Id, ctx: &Context) -> Vec<NodeId> {
     ctx.data(|d| d.get_temp::<SelectedNodes>(id).unwrap_or_default().0)
         .into_vec()
+}
+
+/// Replaces the selected nodes for the `SnarlWidget` with the same explicit ID.
+///
+/// Returns `true` if the selection changed. Only use this with
+/// [`SnarlWidget::id`]; otherwise use [`SnarlWidget::set_selected_nodes`].
+#[must_use]
+pub fn set_selected_nodes(id: Id, ctx: &Context, nodes: impl IntoIterator<Item = NodeId>) -> bool {
+    let replacement = collect_unique_nodes(nodes);
+    mutate_selected_nodes(id, ctx, |selected| selected.clone_from(&replacement))
+}
+
+/// Adds nodes to the selection for the `SnarlWidget` with the same explicit ID.
+///
+/// Returns `true` if the selection changed. Only use this with
+/// [`SnarlWidget::id`]; otherwise use [`SnarlWidget::add_selected_nodes`].
+#[must_use]
+pub fn add_selected_nodes(id: Id, ctx: &Context, nodes: impl IntoIterator<Item = NodeId>) -> bool {
+    let additions = collect_unique_nodes(nodes);
+    mutate_selected_nodes(id, ctx, |selected| {
+        for node in additions {
+            if !selected.contains(&node) {
+                selected.push(node);
+            }
+        }
+    })
+}
+
+/// Removes nodes from the selection for the `SnarlWidget` with the same explicit ID.
+///
+/// Returns `true` if the selection changed. Only use this with
+/// [`SnarlWidget::id`]; otherwise use [`SnarlWidget::remove_selected_nodes`].
+#[must_use]
+pub fn remove_selected_nodes(
+    id: Id,
+    ctx: &Context,
+    nodes: impl IntoIterator<Item = NodeId>,
+) -> bool {
+    let removals = collect_unique_nodes(nodes);
+    mutate_selected_nodes(id, ctx, |selected| {
+        selected.retain(|node| !removals.contains(node));
+    })
+}
+
+/// Clears the selection for the `SnarlWidget` with the same explicit ID.
+///
+/// Returns `true` if the selection changed. Only use this with
+/// [`SnarlWidget::id`]; otherwise use [`SnarlWidget::clear_selected_nodes`].
+#[must_use]
+pub fn clear_selected_nodes(id: Id, ctx: &Context) -> bool {
+    mutate_selected_nodes(id, ctx, SmallVec::clear)
+}
+
+/// Returns whether a node is selected in the `SnarlWidget` with the same explicit ID.
+///
+/// Only use this with [`SnarlWidget::id`]; otherwise use
+/// [`SnarlWidget::is_node_selected`].
+#[must_use]
+pub fn is_node_selected(id: Id, ctx: &Context, node: NodeId) -> bool {
+    SelectedNodes::load(ctx, id).0.contains(&node)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn programmatic_selection_operations_round_trip() {
+        let ctx = Context::default();
+        let id = Id::new("selection-api");
+        let first = NodeId(1);
+        let second = NodeId(2);
+        let third = NodeId(3);
+
+        assert!(set_selected_nodes(id, &ctx, [first, second, first]));
+        assert_eq!(get_selected_nodes(id, &ctx), vec![first, second]);
+        assert!(is_node_selected(id, &ctx, first));
+
+        assert!(add_selected_nodes(id, &ctx, [second, third]));
+        assert_eq!(get_selected_nodes(id, &ctx), vec![first, second, third]);
+
+        assert!(remove_selected_nodes(id, &ctx, [second]));
+        assert_eq!(get_selected_nodes(id, &ctx), vec![first, third]);
+
+        assert!(clear_selected_nodes(id, &ctx));
+        assert!(get_selected_nodes(id, &ctx).is_empty());
+    }
+
+    #[test]
+    fn programmatic_selection_no_ops_report_no_change() {
+        let ctx = Context::default();
+        let id = Id::new("selection-no-op");
+        let node = NodeId(1);
+
+        assert!(!clear_selected_nodes(id, &ctx));
+        assert!(set_selected_nodes(id, &ctx, [node]));
+        assert!(!set_selected_nodes(id, &ctx, [node, node]));
+        assert!(!add_selected_nodes(id, &ctx, [node]));
+        assert!(!remove_selected_nodes(id, &ctx, [NodeId(2)]));
+    }
+
+    #[test]
+    fn widget_ids_have_independent_selections() {
+        let ctx = Context::default();
+        let ui_id = Id::new("ui");
+        let first_widget = SnarlWidget::new().id(Id::new("first-widget"));
+        let second_widget = SnarlWidget::new().id(Id::new("second-widget"));
+
+        assert!(first_widget.set_selected_nodes_at(ui_id, &ctx, [NodeId(1)]));
+        assert!(second_widget.set_selected_nodes_at(ui_id, &ctx, [NodeId(2)]));
+        assert_eq!(
+            first_widget.get_selected_nodes_at(ui_id, &ctx),
+            vec![NodeId(1)]
+        );
+        assert_eq!(
+            second_widget.get_selected_nodes_at(ui_id, &ctx),
+            vec![NodeId(2)]
+        );
+    }
+
+    #[test]
+    fn removed_nodes_are_pruned_from_selection() {
+        let mut snarl = Snarl::new();
+        let valid = snarl.insert_node(Pos2::ZERO, ());
+        let stale = NodeId(valid.0 + 1);
+        let mut selected = smallvec![valid, stale];
+
+        assert!(prune_selected_nodes(&mut selected, &snarl));
+        assert_eq!(selected.as_slice(), &[valid]);
+        assert!(!prune_selected_nodes(&mut selected, &snarl));
+    }
 }
