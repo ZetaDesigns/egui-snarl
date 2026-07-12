@@ -1123,7 +1123,10 @@ where
 
     let selection_interaction = style.get_selection_interaction();
     let mut scene_pan_buttons = style.get_scene_pan_buttons();
-    if selection_interaction == SelectionInteraction::Conventional {
+    if selection_interaction == SelectionInteraction::Conventional
+        || modifiers.shift
+        || snarl_state.is_rect_selection()
+    {
         scene_pan_buttons.remove(DragPanButtons::PRIMARY);
     }
 
@@ -1176,10 +1179,8 @@ where
         || modifiers.shift
         || snarl_state.is_rect_selection()
     {
-        let select_resp = ui.interact(snarl_resp.rect, snarl_id.with("select"), Sense::drag());
-
-        if select_resp.dragged_by(PointerButton::Primary)
-            && let Some(pos) = select_resp.interact_pointer_pos()
+        if snarl_resp.dragged_by(PointerButton::Primary)
+            && let Some(pos) = snarl_resp.interact_pointer_pos()
         {
             if snarl_state.is_rect_selection() {
                 snarl_state.update_rect_selection(pos);
@@ -1188,7 +1189,7 @@ where
             }
         }
 
-        if select_resp.drag_stopped_by(PointerButton::Primary) {
+        if snarl_resp.drag_stopped_by(PointerButton::Primary) {
             if let Some(select_rect) = snarl_state.rect_selection() {
                 rect_selection_ended = Some(select_rect);
             }
