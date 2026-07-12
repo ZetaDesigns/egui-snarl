@@ -3,12 +3,12 @@
 use std::collections::HashMap;
 
 use eframe::{App, CreationContext};
-use egui::{Color32, Id, Ui};
+use egui::{Color32, DragPanButtons, Id, Ui};
 use egui_snarl::{
     InPin, InPinId, NodeId, OutPin, OutPinId, Snarl,
     ui::{
-        AnyPins, NodeLayout, PinInfo, PinPlacement, SnarlStyle, SnarlViewer, SnarlWidget,
-        WireStyle, get_selected_nodes,
+        AnyPins, NodeLayout, PinInfo, PinPlacement, SelectionInteraction, SnarlStyle, SnarlViewer,
+        SnarlWidget, WireStyle, get_selected_nodes,
     },
 };
 
@@ -957,6 +957,8 @@ const fn default_style() -> SnarlStyle {
             stroke: egui::Stroke::NONE,
             shadow: egui::Shadow::NONE,
         }),
+        scene_pan_buttons: Some(DragPanButtons::MIDDLE),
+        selection_interaction: Some(SelectionInteraction::Conventional),
         ..SnarlStyle::new()
     }
 }

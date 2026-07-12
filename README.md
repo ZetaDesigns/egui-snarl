@@ -67,6 +67,31 @@ Because that's how any complex visual graph looks like.
 `demo` example shows some of the features of the crate.
 Run it with `cargo run --example=demo --features="serde egui-probe"`.
 
+The default selection bindings remain compatible with egui-snarl 0.11. To use
+ordinary click selection, primary-button marquee selection, and middle-button
+viewport panning, configure the style like this:
+
+```rust
+use egui::{DragPanButtons, Id};
+use egui_snarl::ui::{SelectionInteraction, SnarlStyle, SnarlWidget};
+
+let style = SnarlStyle {
+    selection_interaction: Some(SelectionInteraction::Conventional),
+    scene_pan_buttons: Some(DragPanButtons::MIDDLE),
+    ..SnarlStyle::new()
+};
+
+SnarlWidget::new()
+    .id(Id::new("graph"))
+    .style(style)
+    .show(&mut snarl, &mut viewer, ui);
+```
+
+Selection is transient widget state. Use `SnarlWidget`'s
+`get_selected_nodes`, `set_selected_nodes`, `add_selected_nodes`,
+`remove_selected_nodes`, `clear_selected_nodes`, and `is_node_selected`
+methods to inspect or update that same state without adding it to `Snarl<T>`.
+
 [![demo](./demo.png)](./demo.png)
 
 # Web Demos
