@@ -4,8 +4,8 @@ use std::collections::HashMap;
 
 use egui::{
     Align, Color32, CornerRadius, DragPanButtons, Frame, Id, LayerId, Layout, Margin, Modifiers,
-    PointerButton, Pos2, Rect, Scene, Sense, Shape, Stroke, StrokeKind, Style, Ui, UiBuilder,
-    UiKind, UiStackInfo, Vec2,
+    PointerButton, Popup, Pos2, Rect, Scene, Sense, Shape, Stroke, StrokeKind, Style, Ui,
+    UiBuilder, UiKind, UiStackInfo, Vec2,
     collapsing_header::paint_default_icon,
     emath::{GuiRounding, TSTransform},
     epaint::Shadow,
@@ -1449,7 +1449,7 @@ where
                         NewWires::Out(x) => AnyPins::Out(x),
                     };
 
-                    let menu_pos = from_global * ui.cursor().min;
+                    let menu_pos = context_menu_graph_pos(ui, &snarl_resp, from_global);
 
                     // Override wire end position when the wire-drop context menu is opened.
                     wire_end_pos = menu_pos;
@@ -1465,7 +1465,7 @@ where
             }
         } else if viewer.has_graph_menu(interact_pos, snarl) {
             snarl_resp.context_menu(|ui| {
-                let menu_pos = from_global * ui.cursor().min;
+                let menu_pos = context_menu_graph_pos(ui, &snarl_resp, from_global);
 
                 viewer.show_graph_menu(menu_pos, ui, snarl);
             });
@@ -1551,6 +1551,16 @@ where
     snarl_state.store(snarl, ui.ctx());
 
     snarl_resp
+}
+
+/// Returns the context-click position in graph space.
+///
+/// The popup itself may move to stay on-screen, so its UI origin is not a stable
+/// substitute for the fixed pointer position remembered by egui.
+fn context_menu_graph_pos(ui: &Ui, response: &egui::Response, from_global: TSTransform) -> Pos2 {
+    let popup_id = Popup::default_response_id(response);
+    let global_pos = Popup::position_of_id(ui.ctx(), popup_id).unwrap_or_else(|| ui.cursor().min);
+    from_global * global_pos
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2913,5 +2923,121 @@ mod selection_tests {
             background_click_selection_command(SelectionInteraction::ModifierOnly, command()),
             SelectionCommand::Clear
         );
+    }
+}
+
+#[cfg(test)]
+mod context_menu_tests {
+    use egui::{Context, Event, PointerButton, RawInput};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct MenuViewer {
+        menu_positions: Vec<Pos2>,
+        popup_origins: Vec<Pos2>,
+    }
+
+    impl SnarlViewer<()> for MenuViewer {
+        fn title(&mut self, _node: &()) -> String {
+            String::new()
+        }
+
+        fn inputs(&mut self, _node: &()) -> usize {
+            0
+        }
+
+        fn show_input(
+            &mut self,
+            _pin: &InPin,
+            _ui: &mut Ui,
+            _snarl: &mut Snarl<()>,
+        ) -> impl SnarlPin + 'static {
+            PinInfo::default()
+        }
+
+        fn outputs(&mut self, _node: &()) -> usize {
+            0
+        }
+
+        fn show_output(
+            &mut self,
+            _pin: &OutPin,
+            _ui: &mut Ui,
+            _snarl: &mut Snarl<()>,
+        ) -> impl SnarlPin + 'static {
+            PinInfo::default()
+        }
+
+        fn has_graph_menu(&mut self, _pos: Pos2, _snarl: &mut Snarl<()>) -> bool {
+            true
+        }
+
+        fn show_graph_menu(&mut self, pos: Pos2, ui: &mut Ui, _snarl: &mut Snarl<()>) {
+            self.menu_positions.push(pos);
+            self.popup_origins.push(ui.cursor().min);
+            for index in 0..10 {
+                let _ = ui.button(format!("Menu item {index}"));
+            }
+        }
+    }
+
+    fn run_frame(
+        ctx: &Context,
+        events: Vec<Event>,
+        snarl: &mut Snarl<()>,
+        viewer: &mut MenuViewer,
+    ) {
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 400.0))),
+            events,
+            ..RawInput::default()
+        };
+
+        let _ = ctx.run_ui(input, |ui| {
+            SnarlWidget::new().show(snarl, viewer, ui);
+        });
+    }
+
+    #[test]
+    fn graph_menu_position_stays_at_context_click_when_popup_moves() {
+        let ctx = Context::default();
+        let mut snarl = Snarl::new();
+        let mut viewer = MenuViewer::default();
+        let click_pos = pos2(200.0, 360.0);
+
+        run_frame(
+            &ctx,
+            vec![Event::PointerMoved(click_pos)],
+            &mut snarl,
+            &mut viewer,
+        );
+        run_frame(
+            &ctx,
+            vec![Event::PointerButton {
+                pos: click_pos,
+                button: PointerButton::Secondary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            }],
+            &mut snarl,
+            &mut viewer,
+        );
+        run_frame(
+            &ctx,
+            vec![Event::PointerButton {
+                pos: click_pos,
+                button: PointerButton::Secondary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            }],
+            &mut snarl,
+            &mut viewer,
+        );
+        run_frame(&ctx, Vec::new(), &mut snarl, &mut viewer);
+
+        assert!(viewer.menu_positions.len() >= 2);
+        assert!(viewer.popup_origins.last().unwrap().y < click_pos.y);
+        assert_eq!(viewer.menu_positions.last(), Some(&click_pos));
     }
 }
