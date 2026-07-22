@@ -19,6 +19,7 @@ use smallvec::SmallVec;
 use crate::{InPin, InPinId, Node, NodeId, OutPin, OutPinId, Snarl, ui::wire::WireId};
 
 mod background_pattern;
+mod node_menu;
 mod pin;
 mod scale;
 mod state;
@@ -33,6 +34,7 @@ use self::{
 
 pub use self::{
     background_pattern::{BackgroundPattern, Grid},
+    node_menu::{NodeMenu, NodeMenuCategory, NodeMenuEntry, NodeMenuOptions},
     pin::{AnyPins, PinInfo, PinShape, PinWireInfo, SnarlPin},
     state::{
         add_selected_nodes, clear_selected_nodes, get_selected_nodes, is_node_selected,

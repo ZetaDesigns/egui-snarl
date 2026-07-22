@@ -36,6 +36,8 @@ Because that's how any complex visual graph looks like.
 - Context menus for nodes and graph background.
   Right-clicking on node, if configured, opens context menu filled by viewer's method. The method is provided with `Snarl` reference and node id. It may be used to add menu options to remove node, configure it or anything else.
   Right-clicking on background, if configured, opens context menu filled by viewer's method. The method is provided with `Snarl` reference. It may be used to add/remove nodes configure whole graph or anything else.
+  `NodeMenu` can be stored in a viewer and used from `show_graph_menu` to present
+  searchable, color-coded node categories with node entries in submenus.
 
 - UI scaling.
   `egui` does not support UI scaling, but to provide best UX `egui-snarl` supports scaling
